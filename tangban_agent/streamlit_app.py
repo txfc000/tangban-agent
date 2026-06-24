@@ -72,7 +72,7 @@ if not profile.get("height") or not profile.get("weight") or not profile.get("ag
             st.rerun()
     st.stop()
 
-# ---------- 侧边栏（只展示数据） ----------
+# ---------- 侧边栏 ----------
 with st.sidebar:
     st.header(f"👋 {username}")
     st.divider()
@@ -91,7 +91,7 @@ with st.sidebar:
 # ---------- 主界面 ----------
 st.title("🍬 糖伴 · 智能控糖助手")
 
-# ---- 编辑个人资料（默认展开） ----
+# ---- 编辑个人资料 ----
 with st.expander("✏️ 编辑个人数据（身高、体重、年龄、性别）", expanded=True):
     col1, col2 = st.columns(2)
     with col1:
@@ -127,7 +127,6 @@ with tab1:
 
     # ---------- 生成按钮 ----------
     if st.button("🚀 生成食谱", type="primary", use_container_width=True):
-        # ----- 原有两种方式（直接生成 / 特殊需求） -----
         if gen_method in ["直接生成", "输入特殊需求后生成"]:
             with st.spinner("🧠 AI正在为您定制专属食谱..."):
                 recipe = recipe_generator.generate_recipe(
@@ -140,38 +139,36 @@ with tab1:
                 db.save_user_data(username, user_data)
                 st.success("✅ 食谱生成完成！")
                 st.markdown(recipe)
-
-        # ----- 新增：智能生成（Agent） -----
         else:
-            # 初始化消息历史（用于展示对话）
+            # 智能生成模式
             if "agent_messages" not in st.session_state:
                 st.session_state.agent_messages = []
-            # 用户发起请求
-            user_query = f"请帮我生成{meal_type}食谱。"
-            if special_need:
-                user_query += f" 特殊需求：{special_need}"
-            st.session_state.agent_messages.append(HumanMessage(content=user_query))
-
-            # 构建初始状态
-            initial_state = {
-                "messages": st.session_state.agent_messages.copy(),
-                "username": username,
-                "meal_type": meal_map[meal_type],
-                "special_need": special_need,
-                "temp_blood_sugar": None,
-                "temp_likes": None,
-                "temp_dislikes": None,
-                "iteration": 0
-            }
-            # 运行 Agent 图
-            final_state = agent_app.invoke(initial_state)
-            st.session_state.agent_messages = final_state["messages"]
+            # 如果还没有任何消息，则自动发送用户初始请求
+            if not st.session_state.agent_messages:
+                user_query = f"请帮我生成{meal_type}食谱。"
+                if special_need:
+                    user_query += f" 特殊需求：{special_need}"
+                st.session_state.agent_messages.append(HumanMessage(content=user_query))
+                # 运行 Agent 得到初始回复
+                initial_state = {
+                    "messages": st.session_state.agent_messages.copy(),
+                    "username": username,
+                    "meal_type": meal_map[meal_type],
+                    "special_need": special_need,
+                    "temp_blood_sugar": None,
+                    "temp_likes": None,
+                    "temp_dislikes": None,
+                    "iteration": 0
+                }
+                final_state = agent_app.invoke(initial_state)
+                st.session_state.agent_messages = final_state["messages"]
             st.rerun()
 
-    # ---------- 显示智能生成的对话历史 ----------
+    # ---------- 显示智能生成的对话历史（如果有） ----------
     if "agent_messages" in st.session_state and st.session_state.agent_messages:
         st.divider()
         st.subheader("💬 智能生成对话")
+        # 显示所有消息
         for msg in st.session_state.agent_messages:
             if isinstance(msg, HumanMessage):
                 with st.chat_message("user"):
@@ -181,15 +178,20 @@ with tab1:
                     st.write(msg.content)
         st.divider()
 
-    # ---------- 智能生成时的用户输入框（用于回答追问） ----------
-    if "agent_messages" in st.session_state and st.session_state.agent_messages:
-        # 简单判断：如果最后一条消息是 AI 的追问（包含问号）
-        last_msg = st.session_state.agent_messages[-1]
-        if isinstance(last_msg, AIMessage) and "?" in last_msg.content:
+        # ---------- 智能生成时的用户输入框（始终显示，只要对话未结束） ----------
+        # 判断对话是否应该结束：如果最后一条是AI且生成了食谱（含“食谱”或“热量”等关键词）
+        last_msg = st.session_state.agent_messages[-1] if st.session_state.agent_messages else None
+        # 简单结束条件：最后一条AI消息长度超过200字且包含“食谱”或“热量”
+        is_finished = False
+        if isinstance(last_msg, AIMessage) and len(last_msg.content) > 200 and ("食谱" in last_msg.content or "热量" in last_msg.content):
+            is_finished = True
+
+        if not is_finished:
             reply = st.chat_input("请输入您的回答...")
             if reply:
+                # 追加用户回答
                 st.session_state.agent_messages.append(HumanMessage(content=reply))
-                # 重新运行 Agent 图
+                # 重新运行 Agent
                 initial_state = {
                     "messages": st.session_state.agent_messages,
                     "username": username,
@@ -203,6 +205,8 @@ with tab1:
                 final_state = agent_app.invoke(initial_state)
                 st.session_state.agent_messages = final_state["messages"]
                 st.rerun()
+        else:
+            st.success("✅ 食谱已生成，您可以在上方查看。如需重新生成，请再次点击“生成食谱”按钮。")
 
     # ---------- 历史食谱记录 ----------
     with st.expander("📚 历史食谱记录"):
@@ -214,7 +218,7 @@ with tab1:
         else:
             st.info("还没有生成过食谱")
 
-# ========== 个性化设置（已删除“清空输入”按钮） ==========
+# ========== 个性化设置 ==========
 with tab2:
     sub_tab1, sub_tab2 = st.tabs(["❤️ 喜好设置", "🚫 忌口设置"])
 
