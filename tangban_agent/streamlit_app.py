@@ -1,10 +1,12 @@
 import streamlit as st
 from src.utils import auth, db, preference_ai
 from src.agent import recipe_generator
+from src.agent.agent_graph import app as agent_app
+from langchain_core.messages import HumanMessage, AIMessage
 
 # ==================== 从 st.secrets 读取 DeepSeek API Key ====================
 DEEPSEEK_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
-# ===========================================================================
+# =============================================================================
 
 st.set_page_config(page_title="🍬 糖伴 · 控糖助手", layout="wide")
 
@@ -113,25 +115,96 @@ with tab1:
     meal_map = {"全天食谱": "全天", "早餐": "早餐", "午餐": "午餐", "晚餐": "晚餐"}
 
     st.divider()
-    gen_method = st.radio("生成方式", ["直接生成", "输入特殊需求后生成"], horizontal=True)
+    gen_method = st.radio("生成方式", [
+        "直接生成",
+        "输入特殊需求后生成",
+        "🤖 智能生成（Agent会主动追问）"
+    ], horizontal=True)
     special_need = ""
     if gen_method == "输入特殊需求后生成":
         special_need = st.text_area("请输入您的特殊情况（如：我刚散步回来）", height=80)
         st.caption("💡 特殊需求会被传递给AI，食谱会根据您的描述做调整")
 
+    # ---------- 生成按钮 ----------
     if st.button("🚀 生成食谱", type="primary", use_container_width=True):
-        with st.spinner("🧠 AI正在为您定制专属食谱..."):
-            recipe = recipe_generator.generate_recipe(
-                DEEPSEEK_API_KEY,
-                user_data,
-                meal_map[meal_type],
-                special_need
-            )
-            user_data.setdefault("recipes", []).append(f"【{meal_type}】\n{recipe}")
-            db.save_user_data(username, user_data)
-            st.success("✅ 食谱生成完成！")
-            st.markdown(recipe)
+        # ----- 原有两种方式（直接生成 / 特殊需求） -----
+        if gen_method in ["直接生成", "输入特殊需求后生成"]:
+            with st.spinner("🧠 AI正在为您定制专属食谱..."):
+                recipe = recipe_generator.generate_recipe(
+                    DEEPSEEK_API_KEY,
+                    user_data,
+                    meal_map[meal_type],
+                    special_need
+                )
+                user_data.setdefault("recipes", []).append(f"【{meal_type}】\n{recipe}")
+                db.save_user_data(username, user_data)
+                st.success("✅ 食谱生成完成！")
+                st.markdown(recipe)
 
+        # ----- 新增：智能生成（Agent） -----
+        else:
+            # 初始化消息历史（用于展示对话）
+            if "agent_messages" not in st.session_state:
+                st.session_state.agent_messages = []
+            # 用户发起请求
+            user_query = f"请帮我生成{meal_type}食谱。"
+            if special_need:
+                user_query += f" 特殊需求：{special_need}"
+            st.session_state.agent_messages.append(HumanMessage(content=user_query))
+
+            # 构建初始状态
+            initial_state = {
+                "messages": st.session_state.agent_messages.copy(),
+                "username": username,
+                "meal_type": meal_map[meal_type],
+                "special_need": special_need,
+                "temp_blood_sugar": None,
+                "temp_likes": None,
+                "temp_dislikes": None,
+                "iteration": 0
+            }
+            # 运行 Agent 图
+            final_state = agent_app.invoke(initial_state)
+            st.session_state.agent_messages = final_state["messages"]
+            st.rerun()
+
+    # ---------- 显示智能生成的对话历史 ----------
+    if "agent_messages" in st.session_state and st.session_state.agent_messages:
+        st.divider()
+        st.subheader("💬 智能生成对话")
+        for msg in st.session_state.agent_messages:
+            if isinstance(msg, HumanMessage):
+                with st.chat_message("user"):
+                    st.write(msg.content)
+            elif isinstance(msg, AIMessage):
+                with st.chat_message("assistant"):
+                    st.write(msg.content)
+        st.divider()
+
+    # ---------- 智能生成时的用户输入框（用于回答追问） ----------
+    if "agent_messages" in st.session_state and st.session_state.agent_messages:
+        # 简单判断：如果最后一条消息是 AI 的追问（包含问号）
+        last_msg = st.session_state.agent_messages[-1]
+        if isinstance(last_msg, AIMessage) and "?" in last_msg.content:
+            reply = st.chat_input("请输入您的回答...")
+            if reply:
+                st.session_state.agent_messages.append(HumanMessage(content=reply))
+                # 重新运行 Agent 图
+                initial_state = {
+                    "messages": st.session_state.agent_messages,
+                    "username": username,
+                    "meal_type": meal_map[meal_type],
+                    "special_need": special_need,
+                    "temp_blood_sugar": None,
+                    "temp_likes": None,
+                    "temp_dislikes": None,
+                    "iteration": 0
+                }
+                final_state = agent_app.invoke(initial_state)
+                st.session_state.agent_messages = final_state["messages"]
+                st.rerun()
+
+    # ---------- 历史食谱记录 ----------
     with st.expander("📚 历史食谱记录"):
         if user_data.get("recipes"):
             for i, r in enumerate(reversed(user_data["recipes"])):
